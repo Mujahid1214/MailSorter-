@@ -1,0 +1,179 @@
+{
+  "name": "MailSorter - AI Email Triage",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": { "item": [ { "mode": "everyMinute" } ] },
+        "simple": false,
+        "filters": { "labelIds": [ "INBOX" ] },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [ 0, 300 ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const out = [];\nfor (const item of $input.all()) {\n  const e = item.json;\n  const subject = e.subject || e.Subject || '(no subject)';\n  let from = 'unknown';\n  if (e.from && e.from.value && e.from.value[0]) from = e.from.value[0].address;\n  else if (e.from && e.from.text) from = e.from.text;\n  else if (e.From) from = e.From;\n  const body = String(e.text || e.snippet || '').slice(0, 4000);\n  const system = 'You are an email triage assistant for a business. Return ONLY valid JSON with keys: category (one of complaint, refund, question, spam, other), urgency (integer 1-5, where 5 is most urgent), sentiment (one of calm, upset, very_angry), summary (one short sentence), draft_reply (a polite, professional reply; empty string if category is spam). Never invent policies, prices or promises. If unsure, ask a clarifying question in the reply.';\n  out.push({ json: { subject, from, threadId: e.threadId || '', requestBody: { model: 'gpt-4o-mini', temperature: 0.2, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: system }, { role: 'user', content: 'Subject: ' + subject + '\\nFrom: ' + from + '\\n\\n' + body } ] } } });\n}\nreturn out;"
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Prepare Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 220, 300 ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "OpenAI Classify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ 440, 300 ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const prep = $('Prepare Email').all();\nconst allowed = ['complaint', 'refund', 'question', 'spam', 'other'];\nconst out = [];\n$input.all().forEach((item, i) => {\n  const ctx = prep[i].json;\n  let r = {};\n  let ok = true;\n  try {\n    r = JSON.parse(item.json.choices[0].message.content);\n  } catch (err) {\n    ok = false;\n  }\n  const category = allowed.includes(r.category) ? r.category : 'other';\n  let urgency = parseInt(r.urgency, 10);\n  if (!(urgency >= 1 && urgency <= 5)) {\n    urgency = 3;\n    ok = false;\n  }\n  out.push({ json: {\n    date: new Date().toISOString(),\n    sender: ctx.from,\n    subject: ctx.subject,\n    threadId: ctx.threadId,\n    category: category,\n    urgency: urgency,\n    sentiment: r.sentiment || 'calm',\n    summary: r.summary || '',\n    draft_reply: r.draft_reply || '',\n    status: ok ? 'processed' : 'needs_review'\n  } });\n});\nreturn out;"
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Parse and Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 660, 300 ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "YOUR_GOOGLE_SHEET_ID", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "Sheet1", "mode": "name" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $json.date }}",
+            "Sender": "={{ $json.sender }}",
+            "Subject": "={{ $json.subject }}",
+            "Category": "={{ $json.category }}",
+            "Urgency": "={{ $json.urgency }}",
+            "Sentiment": "={{ $json.sentiment }}",
+            "Summary": "={{ $json.summary }}",
+            "Status": "={{ $json.status }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "Log to Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [ 900, 120 ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "urgent-check",
+              "leftValue": "={{ $json.urgency }}",
+              "rightValue": 4,
+              "operator": { "type": "number", "operation": "gte" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "Urgent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [ 900, 300 ]
+    },
+    {
+      "parameters": {
+        "sendTo": "manager@example.com",
+        "subject": "=URGENT ({{ $json.urgency }}/5): {{ $json.subject }}",
+        "emailType": "text",
+        "message": "=Category: {{ $json.category }}\nSentiment: {{ $json.sentiment }}\nFrom: {{ $json.sender }}\n\nSummary: {{ $json.summary }}\n\nA draft reply is waiting in Gmail Drafts.",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000007",
+      "name": "Alert Manager",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [ 1140, 220 ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "not-spam-check",
+              "leftValue": "={{ $json.category }}",
+              "rightValue": "spam",
+              "operator": { "type": "string", "operation": "notEquals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000008",
+      "name": "Needs Draft?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [ 900, 480 ]
+    },
+    {
+      "parameters": {
+        "resource": "draft",
+        "subject": "=Re: {{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.draft_reply }}",
+        "options": {
+          "threadId": "={{ $json.threadId }}",
+          "sendTo": "={{ $json.sender }}"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000009",
+      "name": "Save Draft Reply",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [ 1140, 480 ]
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": { "main": [ [ { "node": "Prepare Email", "type": "main", "index": 0 } ] ] },
+    "Prepare Email": { "main": [ [ { "node": "OpenAI Classify", "type": "main", "index": 0 } ] ] },
+    "OpenAI Classify": { "main": [ [ { "node": "Parse and Validate", "type": "main", "index": 0 } ] ] },
+    "Parse and Validate": {
+      "main": [
+        [
+          { "node": "Log to Google Sheet", "type": "main", "index": 0 },
+          { "node": "Urgent?", "type": "main", "index": 0 },
+          { "node": "Needs Draft?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Urgent?": { "main": [ [ { "node": "Alert Manager", "type": "main", "index": 0 } ], [] ] },
+    "Needs Draft?": { "main": [ [ { "node": "Save Draft Reply", "type": "main", "index": 0 } ], [] ] }
+  },
+  "pinData": {},
+  "settings": { "executionOrder": "v1" }
+}
